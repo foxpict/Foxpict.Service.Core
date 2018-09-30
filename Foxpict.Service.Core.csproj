@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netcoreapp2.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Foxpict.Service.Infra\Foxpict.Service.Infra.csproj" />
+    <ProjectReference Include="..\Foxpict.Service.Gateway\Foxpict.Service.Gateway.csproj" />
+    <ProjectReference Include="..\Foxpict.Service.Extention.Sdk\Foxpict.Service.Extention.Sdk.csproj" />
+    <ProjectReference Include="..\Foxpict.Common.Model\Foxpict.Common.Model.csproj" />
+    <ProjectReference Include="..\Foxpict.Common.Core\Foxpict.Common.Core.csproj" />
+    <ProjectReference Include="..\Hyperion.Pf.Entity\Hyperion.Pf.Entity.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NLog" Version="4.5.4" />
+    <PackageReference Include="protobuf-net" Version="2.3.7" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="1.0.0-beta0004" />
+    <PackageReference Include="SimpleInjector" Version="4.1.1" />
+  </ItemGroup>
+
+</Project>
