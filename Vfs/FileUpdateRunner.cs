@@ -44,6 +44,8 @@ namespace Foxpict.Service.Core.Vfs {
 
     readonly IEventLogRepository mEventLogRepository;
 
+    readonly IVirtualFileSystemService mVirtualFileSystemService;
+
     /// <summary>
     /// コンストラクタ
     /// </summary>
@@ -52,7 +54,8 @@ namespace Foxpict.Service.Core.Vfs {
     /// <param name="contentRepository"></param>
     /// <param name="thumbnailBuilder"></param>
     public FileUpdateRunner (IFileMappingInfoRepository fileMappingInfoRepository, ICategoryRepository categoryRepository, IContentRepository contentRepository, IThumbnailBuilder thumbnailBuilder, IAppAppMetaInfoRepository appAppMetaInfoRepository, ILabelRepository labelRepository, IMessagingManager messagingManager,
-      IEventLogRepository eventLogRepository) {
+      IEventLogRepository eventLogRepository,
+      IVirtualFileSystemService virtualFileSystemService) {
       this.mFileMappingInfoRepository = fileMappingInfoRepository;
       this.mCategoryRepository = categoryRepository;
       this.mContentRepository = contentRepository;
@@ -61,6 +64,7 @@ namespace Foxpict.Service.Core.Vfs {
       this.mLabelRepository = labelRepository;
       this.mMessagingManager = messagingManager;
       this.mEventLogRepository = eventLogRepository;
+      this.mVirtualFileSystemService = virtualFileSystemService;
     }
 
     /// <summary>
@@ -111,50 +115,15 @@ namespace Foxpict.Service.Core.Vfs {
       // 1. 対象ファイルが存在するかチェック
       if (!item.Target.Exists)
         throw new ApplicationException ("対象ファイルが指定位置に存在しません。");
+      if (!(item.Target is FileInfo))
+        throw new ApplicationException ("ファイル以外は処理できません");
 
-      // 2. 対象ファイルを、物理空間に移動する（ディレクトリが無い場合は、ディレクトリも作成する）
-      //    一時ファイル名を使用する。
       var aclfileLocalPath_Update = workspace.TrimWorekspacePath (item.Target.FullName);
-      // 移動先のディレクトリがサブディレクトリを含む場合、
-      // 存在しないサブディレクトリを作成します。
-      var newFileInfo = new FileInfo (Path.Combine (workspace.PhysicalPath, aclfileLocalPath_Update));
-      Directory.CreateDirectory (newFileInfo.Directory.FullName);
 
-      var fromFilePath = new FileInfo (Path.Combine (workspace.VirtualPath, aclfileLocalPath_Update));
-      var toFilePath = new FileInfo (Path.Combine (workspace.PhysicalPath, aclfileLocalPath_Update + ".tmp"));
-      File.Move (fromFilePath.FullName, toFilePath.FullName);
-
-      // 3. ACLファイルを仮想空間に作成する
-      var aclfilepath = Path.Combine (workspace.VirtualPath, aclfileLocalPath_Update) + ".aclgene";
-      // ACLファイルの作成を行います。
-      string aclhash = VfsLogicUtils.GenerateACLHash ();
-      var data = new AclFileStructure ();
-      data.Version = AclFileStructure.CURRENT_VERSION;
-      data.LastUpdate = DateTime.Now;
-      data.Data = new KeyValuePair<string, string>[] {
-        new KeyValuePair<string, string> ("ACLHASH", aclhash)
-      };
-
-      using (var file = File.Create (aclfilepath)) {
-        Serializer.Serialize (file, data);
-      }
-
-      // 4. ファイルマッピング情報を作成し、データベースに格納する
-      var entity = mFileMappingInfoRepository.New ();
-      entity.AclHash = aclhash;
-      entity.SetWorkspace (workspace);
-      entity.Mimetype = "image/png"; // 未実装(テスト実装)
-      entity.MappingFilePath = aclfileLocalPath_Update;
-      entity.LostFileFlag = false;
-      mFileMappingInfoRepository.Save ();
-
-      // 5. 一時ファイル名を、正しいファイル名にリネームする
-      if (!File.Exists (toFilePath.FullName)) throw new ApplicationException (toFilePath.FullName + "が見つかりません");
-      var extFileName = Path.GetFileNameWithoutExtension (toFilePath.Name);
-      toFilePath.MoveTo (Path.Combine (toFilePath.DirectoryName, extFileName));
+      var fileMappingInfo = mVirtualFileSystemService.RegisterFile ((FileInfo) item.Target, workspace);
 
       // 6. コンテンツ情報の作成(Category作成→Content作成→タグ・ラベル作成)
-      var content = UpdateContentFromFileMapping (entity);
+      var content = UpdateContentFromFileMapping (fileMappingInfo);
 
       // 7. サムネイル作成
       GenerateArtifact (content, workspace);
