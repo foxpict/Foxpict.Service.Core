@@ -8,6 +8,7 @@ using Foxpict.Service.Infra;
 using Foxpict.Service.Infra.Core;
 using Foxpict.Service.Infra.Model;
 using Foxpict.Service.Infra.Repository;
+using Foxpict.Service.Infra.Utils;
 using Katalib.Nc.Standard.String;
 using NLog;
 using ProtoBuf;
@@ -73,7 +74,7 @@ namespace Foxpict.Service.Core.Vfs {
         throw new ApplicationException ("対象ファイルが指定位置に存在しません。");
 
       // 3. ACLファイルから、ACLハッシュを取得する
-      var aclbin = VfsLogicUtils.ReadACLFile (new FileInfo (item.Target.FullName));
+      var aclbin = ReadACLFile (new FileInfo (item.Target.FullName));
       var aclhash = aclbin.FindKeyValue ("ACLHASH");
 
       // 4. データベースを参照し、ACLハッシュとファイルマッピング情報(AclHash)を突き合わせる
@@ -193,7 +194,7 @@ namespace Foxpict.Service.Core.Vfs {
         throw new ApplicationException ("対象ファイルが指定位置に存在しません。");
 
       // 3. ACLファイルから、ACLハッシュを取得する
-      var aclbin = VfsLogicUtils.ReadACLFile (new FileInfo (item.Target.FullName));
+      var aclbin = ReadACLFile (new FileInfo (item.Target.FullName));
       var aclhash = aclbin.FindKeyValue ("ACLHASH");
 
       // 4. データベースを参照し、ACLハッシュとファイルマッピング情報(AclHash)を突き合わせる
@@ -281,7 +282,6 @@ namespace Foxpict.Service.Core.Vfs {
       if (fileMappingInfo.Mimetype == "image/png") {
         var entity = mContentRepository.New ();
         entity.Name = title;
-        entity.IdentifyKey = RandomAlphameric.RandomAlphanumeric (10);
         entity.SetFileMappingInfo (fileMappingInfo);
         entity.SetCategory (appcat);
         mContentRepository.Save ();
@@ -442,6 +442,12 @@ namespace Foxpict.Service.Core.Vfs {
         }
       }
       return false;
+    }
+
+    private AclFileStructure ReadACLFile (FileInfo aclFillePath) {
+      using (var file = File.OpenRead (aclFillePath.FullName)) {
+        return Serializer.Deserialize<AclFileStructure> (file);
+      }
     }
   }
 }
