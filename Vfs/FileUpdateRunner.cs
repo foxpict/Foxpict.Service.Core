@@ -397,6 +397,7 @@ namespace Foxpict.Service.Core.Vfs {
               label = this.mLabelRepository.New ();
               label.Name = group.ToString ();
               label.MetaType = group.Name == currentGroupNumber.ToString () ? "" : group.Name;
+              mLabelRepository.UpdateNormalizeName(label);
               this.mLabelRepository.Save ();
             } else {
               label.MetaType = group.Name == currentGroupNumber.ToString () ? "" : group.Name;
