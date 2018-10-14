@@ -92,7 +92,7 @@ namespace Foxpict.Service.Core {
           }
         }
       }
-      thumbnailRepository.Save ();
+      //thumbnailRepository.Save ();
 
       return _ThumbnailKey;
     }

@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Foxpict.Service.Infra;
 using Foxpict.Service.Infra.Extention;
+using Hyperion.Pf.Entity;
 using NLog;
 using SimpleInjector;
 using SimpleInjector.Lifestyles;
@@ -15,7 +16,7 @@ namespace Foxpict.Service.Core {
   public class MessagingManager : IMessagingManager {
     private static NLog.Logger LOG = LogManager.GetCurrentClassLogger ();
 
-    private readonly ConcurrentDictionary<string, LinkedList<MessageQueueItem>> m_MessageQueueList = new ConcurrentDictionary<string, LinkedList<MessageQueueItem>> ();
+    private readonly ConcurrentDictionary<string, LinkedList<MessageQueueItem>> mSubscribeList = new ConcurrentDictionary<string, LinkedList<MessageQueueItem>> ();
 
     public readonly Container mContainer;
 
@@ -49,10 +50,10 @@ namespace Foxpict.Service.Core {
     /// <param name="messageName">メッセージ名</param>
     /// <param name="callback">解除するコールバック関数</param>
     public void UnegisterMessage (string messageName, MessageCallback callback) {
-      if (!m_MessageQueueList.ContainsKey (messageName))
+      if (!mSubscribeList.ContainsKey (messageName))
         return;
       LinkedList<MessageQueueItem> queue;
-      if (m_MessageQueueList.TryGetValue (messageName, out queue)) {
+      if (mSubscribeList.TryGetValue (messageName, out queue)) {
         var r = from u in queue
         where u.ExtentionName == ""
         select u;
@@ -70,10 +71,10 @@ namespace Foxpict.Service.Core {
     /// <param name="extention"></param>
     /// <param name="callback">解除するコールバック関数</param>
     public void UnegisterMessage (string messageName, IExtentionMetaInfo extention, MessageCallback callback) {
-      if (!m_MessageQueueList.ContainsKey (messageName))
+      if (!mSubscribeList.ContainsKey (messageName))
         return;
       LinkedList<MessageQueueItem> queue;
-      if (m_MessageQueueList.TryGetValue (messageName, out queue)) {
+      if (mSubscribeList.TryGetValue (messageName, out queue)) {
         var r = from u in queue
         where u.ExtentionName == extention.Name
         select u;
@@ -85,66 +86,52 @@ namespace Foxpict.Service.Core {
     }
 
     /// <summary>
-    /// メッセージの処理を呼び出す
+    /// メッセージを実行します。
+    /// メッセージは新しいスコープで実行されます。
     /// </summary>
-    /// <param name="messageName"></param>
-    /// <param name="param"></param>
-    public void Dispatcher (string messageName, int param) {
-      this.Dispatcher (messageName, (object) param);
-    }
+    /// <param name="messagingContext">メッセージを格納したコンテキスト</param>
+    public void FireMessaging (IMessagingScopeContext messagingContext) {
+      var currentMessagingContext = (MessagingScopeContext) messagingContext;
 
-    /// <summary>
-    /// メッセージの処理を呼び出す
-    /// </summary>
-    /// <param name="messageName"></param>
-    /// <param name="param"></param>
-    public void Dispatcher (string messageName, long param) {
-      this.Dispatcher (messageName, (object) param);
-    }
-
-    /// <summary>
-    /// メッセージの処理を呼び出す
-    /// </summary>
-    /// <param name="messageName"></param>
-    /// <param name="param"></param>
-    public void Dispatcher (string messageName, string param) {
-      this.Dispatcher (messageName, (object) param);
-    }
-
-    /// <summary>
-    /// メッセージの処理を呼び出す
-    /// </summary>
-    /// <param name="messageName">メッセージ名</param>
-    /// <param name="param">コールバックに渡すパラメータ</param>
-    private void Dispatcher (string messageName, object param) {
-      using (AsyncScopedLifestyle.BeginScope (mContainer)) {
-        LinkedList<MessageQueueItem> queue;
-        if (m_MessageQueueList.TryGetValue (messageName, out queue)) {
-          var queueArray = queue.ToArray ();
-          foreach (var queueItem in queueArray) {
+      while (!currentMessagingContext.mDispatcherList.IsEmpty) {
+        DispatcherItem item;
+        if (currentMessagingContext.mDispatcherList.TryDequeue (out item)) {
+          string messageName = item.EventName;
+          object param = item.Param;
+          using (var scope = FoxpictAsyncScopedLifestyle.BeginScope (mContainer)) {
             try {
-              if (string.IsNullOrEmpty (queueItem.ExtentionName)) {
-                var messagecontext = new MessageContext (mContainer, param);
-                queueItem.callback (messagecontext);
-              } else {
-                // 拡張機能に対するメッセージのディスパッチ
-                var messagecontext = new MessageContext (mContainer, queueItem.ExtentionName, param);
-                queueItem.callback (messagecontext);
+              LinkedList<MessageQueueItem> queue;
+              if (mSubscribeList.TryGetValue (messageName, out queue)) {
+                var queueArray = queue.ToArray ();
+                foreach (var queueItem in queueArray) {
+
+                  if (string.IsNullOrEmpty (queueItem.ExtentionName)) {
+                    var messagecontext = new MessageContext (mContainer, param);
+                    queueItem.callback (messagecontext);
+                  } else {
+                    // 拡張機能に対するメッセージのディスパッチ
+                    var messagecontext = new MessageContext (mContainer, queueItem.ExtentionName, param);
+                    queueItem.callback (messagecontext);
+                  }
+                }
               }
+              scope.Complete ();
             } catch (Exception expr) {
               LOG.Error (expr, "拡張機能実行中に処理が停止しました。");
+              LOG.Error (expr.StackTrace);
             }
           }
         }
       }
+
     }
 
     private void _RegisterMessage (string messageName, IExtentionMetaInfo extention, MessageCallback callback) {
-      if (!m_MessageQueueList.ContainsKey (messageName))
-        m_MessageQueueList.TryAdd (messageName, new LinkedList<MessageQueueItem> ());
+      if (!mSubscribeList.ContainsKey (messageName))
+        mSubscribeList.TryAdd (messageName, new LinkedList<MessageQueueItem> ());
 
       LinkedList<MessageQueueItem> queue;
-      if (m_MessageQueueList.TryGetValue (messageName, out queue)) {
+      if (mSubscribeList.TryGetValue (messageName, out queue)) {
         string extentionName = "";
         if (extention != null) {
           extentionName = extention.Name;
@@ -160,6 +147,12 @@ namespace Foxpict.Service.Core {
               ExtentionName = extentionName
           });
       }
+    }
+
+    public class DispatcherItem {
+      public string EventName;
+
+      public object Param;
     }
 
     struct MessageQueueItem {

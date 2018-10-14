@@ -17,16 +17,16 @@ namespace Foxpict.Service.Core.Vfs {
   public class FileUpdateRunner : IFileUpdateRunner {
     static Logger LOG = LogManager.GetCurrentClassLogger ();
 
-    public static readonly string MSG_NEWCATEGORY = "Pixstock.MSG_NEWCATEGORY";
+    public static readonly string MSG_NEWCATEGORY = "Foxpict.MSG_NEWCATEGORY";
 
     /// <summary>
     /// カテゴリ名からラベル情報を取得するために使用するルールの最大数
     /// </summary>
     public static readonly int MAX_CATEGORYPARSEREGE = 1000;
 
-    public static readonly string CategoryNameParserPropertyKey = "FullBuildCategoryNameParser";
+    public static readonly string CategoryNameParserPropertyKey = "InitializeBuildCategoryNameParser";
 
-    public static readonly string CategoryLabelNameParserPropertyKey = "FullBuildCategoryLabelNameParser";
+    public static readonly string CategoryLabelNameParserPropertyKey = "InitializeBuildCategoryLabelNameParser";
 
     readonly IAppAppMetaInfoRepository mAppAppMetaInfoRepository;
 
@@ -40,7 +40,7 @@ namespace Foxpict.Service.Core.Vfs {
 
     readonly IThumbnailBuilder mTumbnailBuilder;
 
-    readonly IMessagingManager mMessagingManager;
+    readonly IMessagingScopeContext mMessagingScopeContext;
 
     readonly IEventLogRepository mEventLogRepository;
 
@@ -53,7 +53,7 @@ namespace Foxpict.Service.Core.Vfs {
     /// <param name="categoryRepository"></param>
     /// <param name="contentRepository"></param>
     /// <param name="thumbnailBuilder"></param>
-    public FileUpdateRunner (IFileMappingInfoRepository fileMappingInfoRepository, ICategoryRepository categoryRepository, IContentRepository contentRepository, IThumbnailBuilder thumbnailBuilder, IAppAppMetaInfoRepository appAppMetaInfoRepository, ILabelRepository labelRepository, IMessagingManager messagingManager,
+    public FileUpdateRunner (IFileMappingInfoRepository fileMappingInfoRepository, ICategoryRepository categoryRepository, IContentRepository contentRepository, IThumbnailBuilder thumbnailBuilder, IAppAppMetaInfoRepository appAppMetaInfoRepository, ILabelRepository labelRepository, IMessagingScopeContext messagingScopeContext,
       IEventLogRepository eventLogRepository,
       IVirtualFileSystemService virtualFileSystemService) {
       this.mFileMappingInfoRepository = fileMappingInfoRepository;
@@ -62,7 +62,7 @@ namespace Foxpict.Service.Core.Vfs {
       this.mTumbnailBuilder = thumbnailBuilder;
       this.mAppAppMetaInfoRepository = appAppMetaInfoRepository;
       this.mLabelRepository = labelRepository;
-      this.mMessagingManager = messagingManager;
+      this.mMessagingScopeContext = messagingScopeContext;
       this.mEventLogRepository = eventLogRepository;
       this.mVirtualFileSystemService = virtualFileSystemService;
     }
@@ -72,13 +72,13 @@ namespace Foxpict.Service.Core.Vfs {
     /// </summary>
     /// <param name="item"></param>
     /// <param name="workspace"></param>
-    public void file_create_acl (FileUpdateQueueItem item, IWorkspace workspace) {
+    public void file_create_acl (FileSystemInfo item, IWorkspace workspace) {
       // 1. 対象ファイルが存在するかチェック
-      if (!item.Target.Exists)
+      if (!item.Exists)
         throw new ApplicationException ("対象ファイルが指定位置に存在しません。");
 
       // 3. ACLファイルから、ACLハッシュを取得する
-      var aclbin = ReadACLFile (new FileInfo (item.Target.FullName));
+      var aclbin = ReadACLFile (new FileInfo (item.FullName));
       var aclhash = aclbin.FindKeyValue ("ACLHASH");
 
       // 4. データベースを参照し、ACLハッシュとファイルマッピング情報(AclHash)を突き合わせる
@@ -93,7 +93,7 @@ namespace Foxpict.Service.Core.Vfs {
 
       // 6. 物理ファイルを、ACLファイルのパスに対応する物理空間のパスへ移動する
       //    移動先が、同じ場所となる場合は処理しない。
-      var aclfileLocalPath_Update = workspace.TrimWorekspacePath (item.Target.FullName);
+      var aclfileLocalPath_Update = workspace.TrimWorekspacePath (item.FullName);
       var extFilePath = Path.Combine (Path.GetDirectoryName (aclfileLocalPath_Update), Path.GetFileNameWithoutExtension (aclfileLocalPath_Update));
       var toFileInfo = new FileInfo (Path.Combine (workspace.PhysicalPath, extFilePath));
       if (phyFileInfo.FullName != toFileInfo.FullName) {
@@ -104,29 +104,30 @@ namespace Foxpict.Service.Core.Vfs {
         entity = mFileMappingInfoRepository.LoadByAclHash (aclhash);
         entity.MappingFilePath = extFilePath; // 新しいファイルマップパス
       }
-
-      mFileMappingInfoRepository.Save ();
     }
 
     /// <summary>
-    /// [LLD-03-05-01:01-01-01]
+    /// 任意のファイルをVFSに登録する
     /// </summary>
-    public void file_create_normal (FileUpdateQueueItem item, IWorkspace workspace) {
-      // 1. 対象ファイルが存在するかチェック
-      if (!item.Target.Exists)
-        throw new ApplicationException ("対象ファイルが指定位置に存在しません。");
-      if (!(item.Target is FileInfo))
-        throw new ApplicationException ("ファイル以外は処理できません");
+    /// <param name="item">登録対象のファイル</param>
+    /// <param name="workspace">ワークスペース</param>
+    public void file_create_normal (FileSystemInfo item, IWorkspace workspace) {
+      LOG.Trace ("IN");
 
-      var aclfileLocalPath_Update = workspace.TrimWorekspacePath (item.Target.FullName);
+      if (!(item is FileInfo))
+        throw new ApplicationException ("ファイル以外は処理できません。");
+      if (!item.Exists)
+        throw new ApplicationException ($"対象ファイル({item.FullName})が存在しません。");
 
-      var fileMappingInfo = mVirtualFileSystemService.RegisterFile ((FileInfo) item.Target, workspace);
-
-      // 6. コンテンツ情報の作成(Category作成→Content作成→タグ・ラベル作成)
+      var fileMappingInfo = mVirtualFileSystemService.PersistentFileMapping (workspace, (FileInfo) item);
       var content = UpdateContentFromFileMapping (fileMappingInfo);
 
-      // 7. サムネイル作成
+      // ファイルの移動
+      mVirtualFileSystemService.RegisterFile ((FileInfo) item, fileMappingInfo);
+
+      // サムネイル作成
       GenerateArtifact (content, workspace);
+      LOG.Trace ("OUT");
     }
 
     /// <summary>
@@ -134,8 +135,9 @@ namespace Foxpict.Service.Core.Vfs {
     /// </summary>
     /// <param name="item"></param>
     /// <param name="workspace"></param>
-    public void file_remove_acl (FileUpdateQueueItem item, IWorkspace workspace) {
-      var aclfileLocalPath_Remove = workspace.TrimWorekspacePath (item.Target.FullName);
+    public void file_remove_acl (FileSystemInfo item, IWorkspace workspace) {
+      LOG.Trace ("IN");
+      var aclfileLocalPath_Remove = workspace.TrimWorekspacePath (item.FullName);
       var vrPath_Remove = Path.Combine (Path.GetDirectoryName (aclfileLocalPath_Remove), Path.GetFileNameWithoutExtension (aclfileLocalPath_Remove));
 
       // 1. 削除したファイルパスと一致するファイルマッピング情報を取得する
@@ -149,7 +151,8 @@ namespace Foxpict.Service.Core.Vfs {
 
       // 4. ファイルマッピング情報をデータベースから削除する
       mFileMappingInfoRepository.Delete (fmi);
-      mFileMappingInfoRepository.Save ();
+
+      LOG.Trace ("OUT");
     }
 
     /// <summary>
@@ -157,13 +160,14 @@ namespace Foxpict.Service.Core.Vfs {
     /// </summary>
     /// <param name="item"></param>
     /// <param name="workspace"></param>
-    public void file_rename_acl (FileUpdateQueueItem item, IWorkspace workspace) {
+    public void file_rename_acl (FileSystemInfo item, IWorkspace workspace) {
+      LOG.Trace ("IN");
       // 1. 対象ファイルが存在するかチェック
-      if (!item.Target.Exists)
+      if (!item.Exists)
         throw new ApplicationException ("対象ファイルが指定位置に存在しません。");
 
       // 3. ACLファイルから、ACLハッシュを取得する
-      var aclbin = ReadACLFile (new FileInfo (item.Target.FullName));
+      var aclbin = ReadACLFile (new FileInfo (item.FullName));
       var aclhash = aclbin.FindKeyValue ("ACLHASH");
 
       // 4. データベースを参照し、ACLハッシュとファイルマッピング情報(AclHash)を突き合わせる
@@ -177,7 +181,7 @@ namespace Foxpict.Service.Core.Vfs {
       if (!phyFileInfo.Exists) throw new ApplicationException ();
 
       // 6. 物理空間のファイルを、リネーム後のACLファイル名と同じ名前に変更する
-      var aclfileLocalPath_Update = workspace.TrimWorekspacePath (item.Target.FullName);
+      var aclfileLocalPath_Update = workspace.TrimWorekspacePath (item.FullName);
       var extFilePath = Path.Combine (Path.GetDirectoryName (aclfileLocalPath_Update), Path.GetFileNameWithoutExtension (aclfileLocalPath_Update));
       var toFileInfo = new FileInfo (Path.Combine (workspace.PhysicalPath, extFilePath));
       if (phyFileInfo.FullName != toFileInfo.FullName) {
@@ -187,8 +191,8 @@ namespace Foxpict.Service.Core.Vfs {
         // 7. ファイルマッピング情報をDBに書き込む(コンテキスト初期化)
         entity = mFileMappingInfoRepository.LoadByAclHash (aclhash);
         entity.MappingFilePath = extFilePath; // 新しいファイルマップパス
-        mFileMappingInfoRepository.Save ();
       }
+      LOG.Trace ("OUT");
     }
 
     /// <summary>
@@ -196,19 +200,15 @@ namespace Foxpict.Service.Core.Vfs {
     /// </summary>
     /// <param name="fileMappingInfo">ファイルマッピング情報</param>
     private IContent UpdateContentFromFileMapping (IFileMappingInfo fileMappingInfo) {
-      // FileMappingInfoがContentとの関連が存在する場合、新規のArtifactは作成できないので例外を投げる。
+      // FileMappingInfoがContentとの関連が存在する場合、
+      // 新規のContentは作成できないので例外を投げる。
       if (fileMappingInfo.Id != 0L) {
-        var a = mContentRepository.Load (fileMappingInfo);
-        if (a != null) throw new ApplicationException ("既にコンテント情報が作成済みのFileMappingInfoです。");
+        if (mContentRepository.Load (fileMappingInfo) != null) throw new ApplicationException ("既にコンテント情報が作成済みのFileMappingInfoです。");
       }
 
       //---
       //!+ パス文字列から、階層構造を持つカテゴリを取得／作成を行うロジック
       //---
-
-      /* DUMMY */
-      var appcat = mCategoryRepository.Load (1L); // ルートカテゴリを取得する(ルートカテゴリ取得に使用するIDをハードコートで指定しているが、これは暫定対応)
-      if (appcat == null) throw new ApplicationException ("ルートカテゴリが見つかりません");
 
       //処理内容
       //   ・パスに含まれるカテゴリすべてが永続化されること
@@ -226,39 +226,36 @@ namespace Foxpict.Service.Core.Vfs {
       //
       // Windows環境: Path.DirectorySeparatorChar
       // Unix環境: Path.AltDirectorySeparatorChar
-      var sttokens = new Stack<string> (pathText.Split (Path.DirectorySeparatorChar, StringSplitOptions.None));
-      var title = sttokens.Pop ();
-      var qutokens = new Queue<string> (sttokens.Reverse<string> ());
+      var pathSplitedList = new Stack<string> (pathText.Split (Path.DirectorySeparatorChar, StringSplitOptions.None));
+      var fileName = pathSplitedList.Pop (); // 最後の要素は、必ずファイル名となる
+      var directoryTreeNames = new Queue<string> (pathSplitedList.Reverse<string> ());
 
-      // 各トークン（パス文字列）のカテゴリを取得、または存在しない場合はカテゴリを新規作成する。
-      while (qutokens.Count > 0) {
+      // パスから取得したトークン文字列と一致するカテゴリを取得します。
+      // 該当のカテゴリが存在しない場合はカテゴリ情報を新規登録する。
+      var appcat = mCategoryRepository.LoadRootCategory();
+      if (appcat == null) throw new ApplicationException ("ルートカテゴリが見つかりません");
+      while (directoryTreeNames.Count > 0) {
         string parsedCategoryName;
         bool categoryCreatedFlag = false;
         bool parseSuccessFlag = false;
-        var oneText = qutokens.Dequeue ();
+        var oneText = directoryTreeNames.Dequeue ();
         parseSuccessFlag = AttachParsedCategoryName (oneText, out parsedCategoryName);
         appcat = CreateOrSelectCategory (appcat, parsedCategoryName, out categoryCreatedFlag);
 
         if (categoryCreatedFlag && parseSuccessFlag) {
-          mMessagingManager.Dispatcher (MSG_NEWCATEGORY, appcat.Id);
+          LOG.Info($"{MSG_NEWCATEGORY}メッセージを配信します。 CategoryId={appcat.Id}");
+          mMessagingScopeContext.Dispatcher (MSG_NEWCATEGORY, appcat.Id);
         }
 
         AttachParsedLabel (oneText, appcat);
       }
 
-      // **コンテント情報を保持するエンティティの作成**
-      //    現Verでは画像のみ、メタ情報を生成できる (それ以外のファイルは、例外を投げる)
-      if (fileMappingInfo.Mimetype == "image/png") {
-        var entity = mContentRepository.New ();
-        entity.Name = title;
-        entity.SetFileMappingInfo (fileMappingInfo);
-        entity.SetCategory (appcat);
-        mContentRepository.Save ();
+      var entity = mContentRepository.New ();
+      entity.Name = fileName;
+      entity.SetFileMappingInfo (fileMappingInfo);
+      entity.SetCategory (appcat);
 
-        return entity;
-      } else {
-        throw new ApplicationException ("処理不能なMIMEタイプです");
-      }
+      return entity;
       // --------------------
       // ここまで
       // --------------------
@@ -288,10 +285,10 @@ namespace Foxpict.Service.Core.Vfs {
 
         // EventLog登録
         var eventLog = mEventLogRepository.New ();
-        eventLog.Message = string.Format ("カテゴリ({})を新規登録しました", categoryName);
+        eventLog.Message = string.Format ("カテゴリ({0})を新規登録しました", categoryName);
         eventLog.EventDate = DateTime.Now;
         eventLog.Sender = "Core";
-        eventLog.EventId = (int) EventLogType.REGISTERCONTENT_VFSWATCH;
+        eventLog.EventNo = (int) EventLogType.REGISTERCONTENT_VFSWATCH;
         mEventLogRepository.Save ();
 
         createdFlag = true;
@@ -313,7 +310,6 @@ namespace Foxpict.Service.Core.Vfs {
         // サムネイル新規作成
         var thumbnailKey = mTumbnailBuilder.BuildThumbnail (null, fullpath);
         content.ThumbnailKey = thumbnailKey;
-        mContentRepository.Save ();
       } else {
         // サムネイルリビルド
         mTumbnailBuilder.BuildThumbnail (content.ThumbnailKey, fullpath);
@@ -364,6 +360,8 @@ namespace Foxpict.Service.Core.Vfs {
     /// <param name="category"></param>
     /// <returns></returns>
     private bool AttachParsedLabel (string parseBase, ICategory category) {
+      LOG.Trace ("IN");
+
       string categoryName = parseBase;
 
       // 最大でMAX_CATEGORYPARSEREGE個数の正規表現からラベルのパースを行う。
@@ -385,6 +383,8 @@ namespace Foxpict.Service.Core.Vfs {
           var match = parserRegex.Match (categoryName);
           if (!match.Success) continue;
 
+          LOG.Debug ("カテゴリ名からラベル生成に使用した正規表現={}", parserApp.Value);
+
           int currentGroupNumber = 0;
           foreach (Group group in match.Groups) {
             if (currentGroupNumber == 0) {
@@ -397,7 +397,7 @@ namespace Foxpict.Service.Core.Vfs {
               label = this.mLabelRepository.New ();
               label.Name = group.ToString ();
               label.MetaType = group.Name == currentGroupNumber.ToString () ? "" : group.Name;
-              mLabelRepository.UpdateNormalizeName(label);
+              mLabelRepository.UpdateNormalizeName (label);
               this.mLabelRepository.Save ();
             } else {
               label.MetaType = group.Name == currentGroupNumber.ToString () ? "" : group.Name;

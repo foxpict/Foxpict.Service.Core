@@ -19,9 +19,18 @@ namespace Foxpict.Service.Core.Service {
       this.mFileMappingInfoRepository = fileMappingInfoRepository;
     }
 
-    public IFileMappingInfo RegisterFile (FileInfo file, IWorkspace workspace) {
+    public IFileMappingInfo PersistentFileMapping (IWorkspace workspace, FileInfo file) {
+      string aclhash = VfsLogicUtils.GenerateACLHash ();
+      var fileMappingInfo = CreateFileMappingInfo (aclhash, workspace, file);
+      return fileMappingInfo;
+    }
+
+    public IFileMappingInfo RegisterFile (FileInfo file, IFileMappingInfo fileMappingInfo) {
+      var workspace = fileMappingInfo.GetWorkspace ();
+      var aclhash = fileMappingInfo.AclHash;
+
       var aclfileLocalPath_Update = workspace.TrimWorekspacePath (file.FullName);
-      mLogger.Info($"aclfileLocalPath_Update={aclfileLocalPath_Update}");
+      mLogger.Info ($"aclfileLocalPath_Update={aclfileLocalPath_Update}");
 
       // 移動先のディレクトリがサブディレクトリを含む場合、存在しないサブディレクトリを作成します。
       var newFileInfo = new FileInfo (Path.Combine (workspace.PhysicalPath, aclfileLocalPath_Update));
@@ -33,7 +42,6 @@ namespace Foxpict.Service.Core.Service {
       // 仮想領域にACLファイルの作成
       var aclfilepath = Path.Combine (workspace.VirtualPath, aclfileLocalPath_Update) + ".aclgene";
 
-      string aclhash = VfsLogicUtils.GenerateACLHash ();
       var data = new AclFileStructure ();
       data.Version = AclFileStructure.CURRENT_VERSION;
       data.LastUpdate = DateTime.Now;
@@ -45,7 +53,6 @@ namespace Foxpict.Service.Core.Service {
         Serializer.Serialize (aclFile, data);
       }
 
-      var fileMappingInfo = CreateFileMappingInfo (aclhash, workspace, file);
       CleanAclFile (toFile);
 
       return fileMappingInfo;

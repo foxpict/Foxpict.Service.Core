@@ -88,5 +88,9 @@ namespace Foxpict.Service.Core {
       }
       return "";
     }
+
+    public object getObject() {
+      return Param;
+    }
   }
 }
