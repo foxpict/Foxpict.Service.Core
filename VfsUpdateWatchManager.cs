@@ -366,7 +366,9 @@ namespace Foxpict.Service.Core {
         // }
       }
 
-      // 走査対象のディレクトリに含まれるファイル一覧を検索する
+      // [FileWatcherコンポーネントの、ファイルイベント通知漏れ対策]
+      // 1つでもファイルイベントが発生しているフォルダでは、そのフォルダのファイル一覧を生成し、ワークフローで処理するために再登録する
+      // ただし、処理済みのファイルまで登録してしまうと2度処理を行うことになるため、除外リストに含まれているファイルは再登録対象から除外する。
       foreach (var pair in _UpdateDirectory.ToList ()) {
         foreach (var fileInfo in pair.Value.GetFiles ("*", SearchOption.AllDirectories)) {
           // LOG.Debug("\t FileInfo:{0}", @fis.FullName);
