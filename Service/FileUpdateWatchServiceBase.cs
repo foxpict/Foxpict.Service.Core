@@ -363,7 +363,7 @@ namespace Foxpict.Service.Core.Service {
             // フォルダ有無を検証し、フォルダが削除済みの場合は更新ディレクトリキューから削除する。
             DirectoryInfo dummy;
             mUpdateDirectory.TryRemove (pair.Key, out dummy);
-            mLogger.Info ($"処理対象のディレクトリ({dummy.Name})を削除");
+            mLogger.Info ($"キューから処理対象のディレクトリ({dummy.Name})を削除");
             continue;
           }
 
@@ -371,12 +371,17 @@ namespace Foxpict.Service.Core.Service {
 
           // インポート領域内で、かつ空フォルダの場合は、フォルダを削除する
           if (itemDirectory.GetFiles ("*", SearchOption.AllDirectories).Length == 0) {
+            try {
+              itemDirectory.Delete (true);
+            } catch (Exception expr) {
+              mLogger.Error (expr, $"フォルダの削除({itemDirectory.Name})に失敗しました。");
+              throw expr;
+            }
             mLogger.Info ($"インポート領域内のディレクトリ({itemDirectory.Name})を削除しました。");
-            itemDirectory.Delete ();
 
             DirectoryInfo dummy;
             mUpdateDirectory.TryRemove (pair.Key, out dummy);
-            mLogger.Info ($"処理対象のディレクトリ({dummy.Name})を削除");
+            mLogger.Info ($"キューから処理対象のディレクトリ({dummy.Name})を削除");
           }
         } else {
           // フォルダが、仮想領域の場合
