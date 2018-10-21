@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Foxpict.Service.Infra;
 using static Foxpict.Service.Core.MessagingManager;
 
 namespace Foxpict.Service.Core {
@@ -23,6 +24,13 @@ namespace Foxpict.Service.Core {
     /// <param name="messageName"></param>
     /// <param name="param"></param>
     void Dispatcher (string messageName, string param);
+
+    /// <summary>
+    /// メッセージを登録します
+    /// </summary>
+    /// <param name="messageName"></param>
+    /// <param name="param"></param>
+    void Dispatcher (string messageName, IMessagingParameter param);
   }
 
   public class MessagingScopeContext : IMessagingScopeContext {
@@ -47,6 +55,10 @@ namespace Foxpict.Service.Core {
     /// <param name="messageName"></param>
     /// <param name="param"></param>
     public void Dispatcher (string messageName, string param) {
+      this._Dispatcher (messageName, (object) param);
+    }
+
+    public void Dispatcher (string messageName, IMessagingParameter param) {
       this._Dispatcher (messageName, (object) param);
     }
 

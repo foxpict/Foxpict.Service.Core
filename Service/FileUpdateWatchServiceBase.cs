@@ -15,61 +15,18 @@ using ProtoBuf;
 using SimpleInjector;
 using SimpleInjector.Lifestyles;
 
-namespace Foxpict.Service.Core {
-  /// <summary>
-  /// キューに登録するための、更新のあった物理ファイル情報のクラスです
-  /// </summary>
-  public class FileUpdateQueueItem {
-
-    /// <summary>
-    /// 同一ファイルで複数回の更新があった場合に時系列で更新イベントを並べるコレクション
-    /// </summary>
-    //public ObservableSynchronizedCollection<RecentInfo> Recents = new ObservableSynchronizedCollection<RecentInfo>();
-    public List<RecentInfo> Recents = new List<RecentInfo> ();
-
-    /// <summary>
-    /// 最後にFileUpdateQueueItemを更新した時刻
-    /// </summary>
-    public DateTime LastUpdate { get; set; }
-
-    /// <summary>
-    /// 変更前の名称を取得します。
-    /// </summary>
-    /// <remarks>
-    /// 名称変更更新があった場合に、変更前の名称を設定します。
-    /// 名称変更更新が複数回行われても、最初に名称変更した際の元のファイル名(ディレクトリ名)を格納します。
-    /// </remarks>
-    public string OldRenameNamePath { get; set; }
-
-    /// <summary>
-    /// ウォッチした更新対象
-    /// </summary>
-    public FileSystemInfo Target { get; set; }
-
-  }
-
-  /// <summary>
-  /// 対象のファイルへのイベントが同時に複数発生した場合の発生順序を記録する
-  /// </summary>
-  public class RecentInfo {
-    /// <summary>
-    ///
-    /// </summary>
-    public WatcherChangeTypes EventType { get; set; }
-
-    /// <summary>
-    /// 記録日時
-    /// </summary>
-    public DateTime RecentDate { get; set; }
-  }
+namespace Foxpict.Service.Core.Service {
 
   /// <summary>
   /// 仮想ファイル監視マネージャ
   /// </summary>
-  public class VspFileUpdateWatchManager {
+  public class FileUpdateWatchServiceBase {
     private readonly Logger mLogger;
 
-    readonly Container container;
+    /// <summary>
+    /// DIコンテナ
+    /// </summary>
+    protected readonly Container container;
 
     /// <summary>
     /// CPU使用率をOSから取得するためのオブジェクト
@@ -79,17 +36,19 @@ namespace Foxpict.Service.Core {
     /// <summary>
     /// 定期的にインデックス作成処理を実行するためのタイマー
     /// </summary>
-    readonly System.Timers.Timer _IndexQueueTimer;
+    readonly System.Timers.Timer mIndexQueueTimer;
 
     /// <summary>
     /// WindowsAPIを使用したファイルシステム監視ロジック
     /// </summary>
-    readonly FileSystemWatcher _Watcher;
+    readonly FileSystemWatcher mWatcherVirtual; // 仮想領域用
+
+    readonly FileSystemWatcher mWatcherImport; // インポート領域用
 
     /// <summary>
     /// FS監視対象のワークスペース情報
     /// </summary>
-    IWorkspace _Workspace;
+    IWorkspace mWorkspace;
 
     /// <summary>
     /// 更新イベント除外ファイルパスリスト
@@ -98,7 +57,7 @@ namespace Foxpict.Service.Core {
     /// 更新イベントの内部処理により、別の更新イベントが発生する可能性があるファイルのコレクションです。
     /// 値には更新イベントが発生する可能性がある仮想ディレクトリ空間のファイルパス(フルパス)が含まれます。
     /// </remarks>
-    ConcurrentQueue<string> _IgnoreUpdateFiles = new ConcurrentQueue<string> ();
+    ConcurrentQueue<string> mIgnoreUpdateFiles = new ConcurrentQueue<string> ();
 
     /// <summary>
     /// タイマーを使用した、インデックス作成処理実行機能のON/OFF
@@ -113,7 +72,9 @@ namespace Foxpict.Service.Core {
     /// ファイルシステムを監視しているスレッド以外から安全に辞書にアクセスできるように
     /// スレッドセーフな辞書クラスを使用しています。
     /// </remarks>
-    ConcurrentDictionary<string, FileUpdateQueueItem> _UpdatesWatchFiles = new ConcurrentDictionary<string, FileUpdateQueueItem> ();
+    /// <typeparam name="string">ファイルフルパス</typeparam>
+    /// <typeparam name="FileUpdateQueueItem"></typeparam>
+    ConcurrentDictionary<string, FileUpdateQueueItem> mUpdatesWatchFiles = new ConcurrentDictionary<string, FileUpdateQueueItem> ();
 
     /// <summary>
     /// ファイルシステム変更通知により、変更があったディレクトリです。
@@ -121,7 +82,7 @@ namespace Foxpict.Service.Core {
     /// <typeparam name="string"></typeparam>
     /// <typeparam name="DirectoryInfo"></typeparam>
     /// <returns></returns>
-    ConcurrentDictionary<string, DirectoryInfo> _UpdateDirectory = new ConcurrentDictionary<string, DirectoryInfo> ();
+    ConcurrentDictionary<string, DirectoryInfo> mUpdateDirectory = new ConcurrentDictionary<string, DirectoryInfo> ();
 
     /// <summary>
     /// ディレクトリ移動の同一判定で、移動を行ったディレクトリ名を格納する
@@ -129,8 +90,8 @@ namespace Foxpict.Service.Core {
     /// <remarks><pre>
     /// 空文字の場合は、ディレクトリの移動が行われていないことを示す。
     /// ディレクトリ移動の同一判定では、「Delete→Create」が短時間で発生しているかチェックする。
-    /// 最長期限は、インデックス生成タイマー実行までで、Createイベントまたはインデックス生成タイマーにより
-    /// この変数はクリア(空文字)される。
+    /// 最長期限はインデックス生成タイマー実行までで、Createイベントまたはインデックス生成タイマー処理の実行で
+    /// この変数をクリア(空文字)する。
     /// </pre></remarks>
     string sameDirectoryOperation_FullPath = "";
 
@@ -148,28 +109,37 @@ namespace Foxpict.Service.Core {
     /// コンストラクタ
     /// </summary>
     /// <param name="container"></param>
-    public VspFileUpdateWatchManager (Container container) {
+    public FileUpdateWatchServiceBase (Container container) {
       this.mLogger = LogManager.GetCurrentClassLogger ();
       this.container = container;
 
       //this._CpuCounter = RuntimePerformanceUtility.CreateCpuCounter();
-      this._Watcher = new FileSystemWatcher ();
+      mWatcherVirtual = new FileSystemWatcher ();
+      mWatcherImport = new FileSystemWatcher ();
 
-      // 検索対象
-      this._Watcher.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName | NotifyFilters.Security | NotifyFilters.DirectoryName;
-
-      // サブディレクトリも監視対象。
-      this._Watcher.IncludeSubdirectories = true;
-
-      this._Watcher.Changed += OnWatcherChanged;
-      this._Watcher.Created += OnWatcherCreated;
-      this._Watcher.Deleted += OnWatcherDeleted;
-      this._Watcher.Renamed += OnWatcherRenamed;
+      SetupWatcher (mWatcherVirtual, true, true, true, true);
+      SetupWatcher (mWatcherImport, false, true, false, false);
 
       // タイマー設定
-      this._IndexQueueTimer = new System.Timers.Timer (30000); // 30sec
-      this._IndexQueueTimer.Elapsed += OnIndexTimerElapsed;
-      this._IndexQueueTimer.Enabled = true;
+      this.mIndexQueueTimer = new System.Timers.Timer (30000); // 30sec
+      this.mIndexQueueTimer.Elapsed += OnIndexTimerElapsed;
+      this.mIndexQueueTimer.Enabled = true;
+    }
+
+    private void SetupWatcher (FileSystemWatcher watcher, bool enableChange, bool enableCreate, bool enableDelete, bool enableRename) {
+      watcher.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName | NotifyFilters.Security | NotifyFilters.DirectoryName;
+
+      // サブディレクトリも監視対象。
+      watcher.IncludeSubdirectories = true;
+
+      if (enableChange)
+        watcher.Changed += OnWatcherChanged;
+      if (enableCreate)
+        watcher.Created += OnWatcherCreated;
+      if (enableDelete)
+        watcher.Deleted += OnWatcherDeleted;
+      if (enableRename)
+        watcher.Renamed += OnWatcherRenamed;
     }
 
     /// <summary>
@@ -191,8 +161,8 @@ namespace Foxpict.Service.Core {
     public string DumpUpdateWatchedFile () {
       const string indentText = "  ";
       StringBuilder sb = new StringBuilder ();
-      sb.AppendLine ("イベント発生数:" + _UpdatesWatchFiles.Count);
-      foreach (var prop in _UpdatesWatchFiles) {
+      sb.AppendLine ("イベント発生数:" + mUpdatesWatchFiles.Count);
+      foreach (var prop in mUpdatesWatchFiles) {
         sb.Append ("★Key=").Append (prop.Key).AppendLine ();
         sb.Append (indentText).Append ("更新回数=").Append (prop.Value.Recents.Count);
         sb.AppendLine ();
@@ -218,15 +188,21 @@ namespace Foxpict.Service.Core {
     /// ファイルシステムの監視を開始します
     /// </summary>
     /// <param name="workspace">監視対象のディレクトリパスを含むワークスペース情報</param>
-    public void StartWatch (IWorkspace workspace) {
-      this._Workspace = workspace;
+    public void StartWatchByVirtualPath (IWorkspace workspace) {
+      this.mWorkspace = workspace;
 
       try {
-        _Watcher.Path = _Workspace.VirtualPath;
-        _Watcher.EnableRaisingEvents = true;
-        mLogger.Info ("[{0}]のファイル監視を開始します", _Watcher.Path);
+        mWatcherVirtual.Path = mWorkspace.VirtualPath;
+        mWatcherVirtual.EnableRaisingEvents = true;
+        mLogger.Info ("[{0}]のファイル監視を開始します", mWatcherVirtual.Path);
+
+        mWatcherImport.Path = mWorkspace.ImportPath;
+        mWatcherImport.EnableRaisingEvents = true;
+        mLogger.Info ("[{0}]のファイル監視を開始します", mWatcherImport.Path);
+
       } catch (Exception expr) {
         mLogger.Warn ("ファイルシステムの監視に失敗しました({0})", expr.Message);
+        throw new ApplicationException ();
       }
     }
 
@@ -234,11 +210,11 @@ namespace Foxpict.Service.Core {
     /// ファイルシステムの監視を停止します
     /// </summary>
     public void StopWatch () {
-      _Watcher.EnableRaisingEvents = false;
+      mWatcherVirtual.EnableRaisingEvents = false;
     }
 
     /// <summary>
-    /// 定期的に、ファイル操作があったファイルに対するVFS処理を行う
+    /// ファイルに対するVFS処理を定期実行します
     /// </summary>
     /// <param name="sender"></param>
     /// <param name="e"></param>
@@ -256,28 +232,28 @@ namespace Foxpict.Service.Core {
       lock (sameDirectoryOperation_Locker) {
         if (sameDirectoryOperation_Name != "") {
           sameDirectoryOperation_Name = "";
-          var relativeDirPath = _Workspace.TrimWorekspacePath (sameDirectoryOperation_FullPath);
+          var relativeDirPath = mWorkspace.TrimWorekspacePath (sameDirectoryOperation_FullPath);
           using (AsyncScopedLifestyle.BeginScope (container)) {
             var fileMappingInfoRepository = container.GetInstance<IFileMappingInfoRepository> ();
 
             foreach (var prop in fileMappingInfoRepository.FindPathWithStart (relativeDirPath)) {
-              var fileUpdateQueueItem = new FileUpdateQueueItem { Target = new FileInfo (Path.Combine (_Workspace.VirtualPath, prop.MappingFilePath + ".aclgene")) };
+              var fileUpdateQueueItem = new FileUpdateQueueItem { Target = new FileInfo (Path.Combine (mWatcherVirtual.Path, prop.MappingFilePath + ".aclgene")) };
               fileUpdateQueueItem.Recents.Add (new RecentInfo { EventType = WatcherChangeTypes.Deleted });
-              _UpdatesWatchFiles.AddOrUpdate (prop.MappingFilePath, fileUpdateQueueItem, (_key, _value) => fileUpdateQueueItem);
+              mUpdatesWatchFiles.AddOrUpdate (prop.MappingFilePath, fileUpdateQueueItem, (_key, _value) => fileUpdateQueueItem);
             }
           }
         }
       }
 
       //
-      foreach (var @pair in _UpdatesWatchFiles.ToList ()) {
+      foreach (var @pair in mUpdatesWatchFiles.ToList ()) {
         // 最後のファイル監視状態から、一定時間経過している場合のみ処理を行う。
         var @diff = DateTime.Now - @pair.Value.LastUpdate;
 
         if (@diff.Seconds >= 10) // 10秒 以上経過
         {
           FileUpdateQueueItem item; // work
-          if (_UpdatesWatchFiles.TryRemove (@pair.Key, out item)) {
+          if (mUpdatesWatchFiles.TryRemove (@pair.Key, out item)) {
             var @lastItem = item.Recents.LastOrDefault ();
 
             // NOTE: UpdateVirtualSpaceFlowワークフローを呼び出す
@@ -287,17 +263,25 @@ namespace Foxpict.Service.Core {
             // 処理中のファイルを更新キューから除外するための除外リストに、処理中のファイルを追加する。
             //
             // ※処理中のファイルがACLファイル以外の場合、対象ファイルのACLファイル名も除外リストに追加する
-            _IgnoreUpdateFiles.Enqueue (item.Target.FullName);
-            if (item.Target.Extension != ".aclgene")
-              _IgnoreUpdateFiles.Enqueue (item.Target.FullName + ".aclgene");
+            mIgnoreUpdateFiles.Enqueue (item.Target.FullName);
+            if (item.Target.Extension != ".aclgene") {
+              var localPath = mWorkspace.TrimWorekspacePath (item.Target.FullName);
+              var vpath = Path.Combine (mWorkspace.VirtualPath, localPath);
+              mIgnoreUpdateFiles.Enqueue (vpath + ".aclgene"); // 仮想領域に作成するACLファイルを除外リストに追加
+            }
 
             using (var scope = FoxpictAsyncScopedLifestyle.BeginScope (container)) {
               try {
                 var workspaceRepository = container.GetInstance<IWorkspaceRepository> ();
-                var workspace = workspaceRepository.Load (_Workspace.Id);
-                if (workspace == null) workspace = _Workspace;
+                var workspace = workspaceRepository.Load (mWorkspace.Id);
+                if (workspace == null) workspace = mWorkspace;
 
+                // VFS機能のサービスを取得する
                 var fileUpdateRunner = container.GetInstance<IFileUpdateRunner> ();
+                if (workspace.ContainsImport (item.Target)) {
+                  // インポート領域のファイルの場合は、カテゴリのパース処理を実施する。
+                  fileUpdateRunner.EnableCategoryParse = true;
+                }
 
                 // 処理対象のファイルがACLファイルか、物理ファイルかで処理を切り分けます
                 // ■ACLファイルの場合
@@ -347,9 +331,9 @@ namespace Foxpict.Service.Core {
 
             // 処理を終了したファイルを、除外リストから削除します
             string ignoreUpdateFile;
-            _IgnoreUpdateFiles.TryDequeue (out ignoreUpdateFile);
+            mIgnoreUpdateFiles.TryDequeue (out ignoreUpdateFile);
             if (item.Target.Extension != ".aclgene")
-              _IgnoreUpdateFiles.TryDequeue (out ignoreUpdateFile);
+              mIgnoreUpdateFiles.TryDequeue (out ignoreUpdateFile);
           }
 
         }
@@ -367,31 +351,66 @@ namespace Foxpict.Service.Core {
       }
 
       // [FileWatcherコンポーネントの、ファイルイベント通知漏れ対策]
-      // 1つでもファイルイベントが発生しているフォルダでは、そのフォルダのファイル一覧を生成し、ワークフローで処理するために再登録する
-      // ただし、処理済みのファイルまで登録してしまうと2度処理を行うことになるため、除外リストに含まれているファイルは再登録対象から除外する。
-      foreach (var pair in _UpdateDirectory.ToList ()) {
-        foreach (var fileInfo in pair.Value.GetFiles ("*", SearchOption.AllDirectories)) {
-          // LOG.Debug("\t FileInfo:{0}", @fis.FullName);
+      // 1つでもファイルイベントが発生しているフォルダは、そのフォルダに属するファイルを処理キューに「新規作成アイテム」として登録する。
+      // ただし、処理済みのファイルまで登録してしまうと2度処理を行うことになるため、除外リストに含まれているファイルは処理キューへの登録は行わない。
+      foreach (var pair in mUpdateDirectory.ToList ()) {
+        var itemDirectory = new DirectoryInfo (pair.Value.FullName);
 
-          // システムファイルに対しては処理を行わない。
-          if ((fileInfo.Attributes & FileAttributes.Hidden) == FileAttributes.Hidden)
-            return;
-          if ((fileInfo.Attributes & FileAttributes.Temporary) == FileAttributes.Temporary)
-            return;
-          if ((fileInfo.Attributes & FileAttributes.System) == FileAttributes.System)
-            return;
-
-          // 除外リストに含まれていない場合は、処理対象ファイルとして登録する
-          if (!_IgnoreUpdateFiles.Contains (fileInfo.FullName)) {
-            UpdateOrInsertUpdatedFileQueueItem (fileInfo, WatcherChangeTypes.Created, null);
+        if (mWorkspace.ContainsImport (itemDirectory)) {
+          // フォルダが、インポート領域の場合
+          if (!itemDirectory.Exists) {
+            // インポート領域では、Deleteイベントは受け取らないため、
+            // フォルダ有無を検証し、フォルダが削除済みの場合は更新ディレクトリキューから削除する。
+            DirectoryInfo dummy;
+            mUpdateDirectory.TryRemove (pair.Key, out dummy);
+            mLogger.Info ($"処理対象のディレクトリ({dummy.Name})を削除");
+            continue;
           }
 
+          RegisterDirectoryFiles (itemDirectory);
+
+          // インポート領域内で、かつ空フォルダの場合は、フォルダを削除する
+          if (itemDirectory.GetFiles ("*", SearchOption.AllDirectories).Length == 0) {
+            mLogger.Info ($"インポート領域内のディレクトリ({itemDirectory.Name})を削除しました。");
+            itemDirectory.Delete ();
+
+            DirectoryInfo dummy;
+            mUpdateDirectory.TryRemove (pair.Key, out dummy);
+            mLogger.Info ($"処理対象のディレクトリ({dummy.Name})を削除");
+          }
+        } else {
+          // フォルダが、仮想領域の場合
+          RegisterDirectoryFiles (itemDirectory);
+
           DirectoryInfo dummy;
-          _UpdateDirectory.TryRemove (pair.Key, out dummy);
+          mUpdateDirectory.TryRemove (itemDirectory.FullName, out dummy);
         }
       }
 
       timer.Enabled = true;
+    }
+
+    /// <summary>
+    /// ディレクトリ内のファイルを、処理キューに登録する
+    /// </summary>
+    /// <param name="directoryInfo">対象ディレクトリ</param>
+    void RegisterDirectoryFiles (DirectoryInfo directoryInfo) {
+      foreach (var fileInfo in directoryInfo.GetFiles ("*", SearchOption.AllDirectories)) {
+        // LOG.Debug("\t FileInfo:{0}", @fis.FullName);
+
+        // システムファイルに対しては処理を行わない。
+        if ((fileInfo.Attributes & FileAttributes.Hidden) == FileAttributes.Hidden)
+          return;
+        if ((fileInfo.Attributes & FileAttributes.Temporary) == FileAttributes.Temporary)
+          return;
+        if ((fileInfo.Attributes & FileAttributes.System) == FileAttributes.System)
+          return;
+
+        // 除外リストに含まれていない場合は、処理対象ファイルとして登録する
+        if (!mIgnoreUpdateFiles.Contains (fileInfo.FullName)) {
+          UpdateOrInsertUpdatedFileQueueItem (fileInfo, WatcherChangeTypes.Created, null);
+        }
+      }
     }
 
     /// <summary>
@@ -400,14 +419,14 @@ namespace Foxpict.Service.Core {
     /// <param name="sender"></param>
     /// <param name="e"></param>
     void OnWatcherChanged (object sender, FileSystemEventArgs e) {
-      _IndexQueueTimer.Stop ();
+      mIndexQueueTimer.Stop ();
       try {
         mLogger.Info ("OnWatcherChanged  FullPath:{0}", e.FullPath);
 
         // eを手放してイベントの呼び出し元に返すために、e.FullPathからFileInfoを作成し、
         // 以降はFileInfoを使用して処理を進めるところがキモ。
         FileInfo fileInfo = new FileInfo (e.FullPath);
-        if (_IgnoreUpdateFiles.Contains (fileInfo.FullName)) {
+        if (mIgnoreUpdateFiles.Contains (fileInfo.FullName)) {
           mLogger.Info ("{0}は除外リストに含まれるため、イベントコレクションには追加しない", fileInfo.FullName);
           return;
         }
@@ -429,7 +448,7 @@ namespace Foxpict.Service.Core {
 
         UpdateOrInsertUpdatedFileQueueItem (fileInfo, e.ChangeType, null);
       } finally {
-        _IndexQueueTimer.Start ();
+        mIndexQueueTimer.Start ();
       }
     }
 
@@ -439,7 +458,7 @@ namespace Foxpict.Service.Core {
     /// <param name="sender"></param>
     /// <param name="e"></param>
     void OnWatcherCreated (object sender, FileSystemEventArgs e) {
-      _IndexQueueTimer.Stop ();
+      mIndexQueueTimer.Stop ();
       try {
 
         mLogger.Info ("OnWatcherCreated  FullPath:{0}", e.FullPath);
@@ -449,7 +468,7 @@ namespace Foxpict.Service.Core {
           // eを手放してイベントの呼び出し元に返すために、e.FullPathからFileInfoを作成し、
           // 以降はFileInfoを使用して処理を進めるところがキモ。
           FileInfo fileInfo = new FileInfo (e.FullPath);
-          if (_IgnoreUpdateFiles.Contains (fileInfo.FullName)) {
+          if (mIgnoreUpdateFiles.Contains (fileInfo.FullName)) {
             mLogger.Info ("{0}は除外リストに含まれるため、イベントコレクションには追加しない", fileInfo.FullName);
             return;
           }
@@ -467,7 +486,7 @@ namespace Foxpict.Service.Core {
           UpdateOrInsertUpdatedFileQueueItem (fileInfo, e.ChangeType, null);
         } else {
           var directoryInfo = new DirectoryInfo (e.FullPath);
-          if (_IgnoreUpdateFiles.Contains (directoryInfo.FullName)) {
+          if (mIgnoreUpdateFiles.Contains (directoryInfo.FullName)) {
             mLogger.Info ("{0}は除外リストに含まれるため、イベントコレクションには追加しない", directoryInfo.FullName);
             return;
           }
@@ -482,10 +501,11 @@ namespace Foxpict.Service.Core {
             }
           }
 
-          _UpdateDirectory.AddOrUpdate (directoryInfo.FullName, directoryInfo, (key, value) => directoryInfo);
+          mLogger.Info ($"処理対象のディレクトリ({directoryInfo.Name})を追加");
+          mUpdateDirectory.AddOrUpdate (directoryInfo.FullName, directoryInfo, (key, value) => directoryInfo);
         }
       } finally {
-        _IndexQueueTimer.Start ();
+        mIndexQueueTimer.Start ();
       }
     }
 
@@ -495,7 +515,7 @@ namespace Foxpict.Service.Core {
     /// <param name="sender"></param>
     /// <param name="e"></param>
     void OnWatcherDeleted (object sender, FileSystemEventArgs e) {
-      _IndexQueueTimer.Stop ();
+      mIndexQueueTimer.Stop ();
 
       try {
         // 2016/4/23 処理見直し
@@ -506,13 +526,13 @@ namespace Foxpict.Service.Core {
         mLogger.Info ("OnWatcherDeleted  FullPath:{0}", e.FullPath);
 
         FileInfo fileInfo = new FileInfo (e.FullPath);
-        if (_IgnoreUpdateFiles.Contains (fileInfo.FullName)) {
+        if (mIgnoreUpdateFiles.Contains (fileInfo.FullName)) {
           mLogger.Info ("{0}は除外リストに含まれるため、イベントコレクションには追加しない", fileInfo.FullName);
           return;
         }
 
-        // 削除イベントに関しては、ACLファイル以外は更新キューには入れない
         if (fileInfo.Extension == ".aclgene") {
+          // 削除イベントは、ACLファイル以外は更新キューに追加しない
           UpdateOrInsertUpdatedFileQueueItem (fileInfo, e.ChangeType, null);
         } else {
           lock (sameDirectoryOperation_Locker) {
@@ -526,7 +546,7 @@ namespace Foxpict.Service.Core {
           }
         }
       } finally {
-        _IndexQueueTimer.Start ();
+        mIndexQueueTimer.Start ();
       }
     }
 
@@ -536,19 +556,19 @@ namespace Foxpict.Service.Core {
     /// <param name="sender"></param>
     /// <param name="e"></param>
     void OnWatcherRenamed (object sender, RenamedEventArgs e) {
-      _IndexQueueTimer.Stop ();
+      mIndexQueueTimer.Stop ();
       try {
         mLogger.Info ("OnWatcherRenamed\n  FullPath:{0}\n   OldPath:{1}", e.FullPath, e.OldFullPath);
 
         // eを手放してイベントの呼び出し元に返すために、e.FullPathからFileInfoを作成し、
         // 以降はFileInfoを使用して処理を進めるところがキモ。
         FileInfo fileInfo = new FileInfo (e.FullPath);
-        if (_IgnoreUpdateFiles.Contains (fileInfo.FullName)) {
+        if (mIgnoreUpdateFiles.Contains (fileInfo.FullName)) {
           mLogger.Info ("{0}は除外リストに含まれるため、イベントコレクションには追加しない", fileInfo.FullName);
           return;
         }
 
-        var oldFullPath_relatived = _Workspace.TrimWorekspacePath (e.OldFullPath);
+        var oldFullPath_relatived = mWorkspace.TrimWorekspacePath (e.OldFullPath);
 
         if ((fileInfo.Attributes & FileAttributes.Directory) == FileAttributes.Directory) {
           // ディレクトリのリネームでは、そのディレクトリ構造に属するすべてのファイルの情報を更新する。
@@ -556,7 +576,8 @@ namespace Foxpict.Service.Core {
           var @dir = new DirectoryInfo (e.FullPath);
           //LOG.Debug("\t DirectoryInfo:{0}", @dir.FullName);
 
-          foreach (var @fis in @dir.GetFiles ("*", SearchOption.AllDirectories)) {
+          var files = @dir.GetFiles ("*", SearchOption.AllDirectories);
+          foreach (var @fis in files) {
             //LOG.Debug("\t FileInfo:{0}", @fis.FullName);
             UpdateOrInsertUpdatedFileQueueItem (@fis, WatcherChangeTypes.Created,
               Path.Combine (oldFullPath_relatived, @fis.Name)
@@ -575,7 +596,7 @@ namespace Foxpict.Service.Core {
           UpdateOrInsertUpdatedFileQueueItem (fileInfo, WatcherChangeTypes.Renamed, oldFullPath_relatived);
         }
       } finally {
-        _IndexQueueTimer.Start ();
+        mIndexQueueTimer.Start ();
       }
     }
 
@@ -602,18 +623,18 @@ namespace Foxpict.Service.Core {
           // ※ただし、ファイル削除を除く
 
           if (watcherChangeType == WatcherChangeTypes.Deleted) {
-            var deletedFileRelativePath = this._Workspace.TrimWorekspacePath (watchTarget.FullName);
-            var r = from u in _UpdatesWatchFiles
+            var deletedFileRelativePath = this.mWorkspace.TrimWorekspacePath (watchTarget.FullName);
+            var r = from u in mUpdatesWatchFiles
             where u.Value.OldRenameNamePath == deletedFileRelativePath
             select u;
             var prop = r.FirstOrDefault ();
             if (prop.Key != null) {
-              _UpdatesWatchFiles.TryGetValue (prop.Key, out fileUpdateQueueItem);
+              mUpdatesWatchFiles.TryGetValue (prop.Key, out fileUpdateQueueItem);
             } else {
 
               fileUpdateQueueItem = new FileUpdateQueueItem { Target = watchTarget };
 
-              _UpdatesWatchFiles.AddOrUpdate (deletedFileRelativePath,
+              mUpdatesWatchFiles.AddOrUpdate (deletedFileRelativePath,
                 fileUpdateQueueItem, (_key, _value) => fileUpdateQueueItem
               );
 
@@ -631,18 +652,18 @@ namespace Foxpict.Service.Core {
 
             var aclhash = aclFileData.FindKeyValue ("ACLHASH");
 
-            if (!_UpdatesWatchFiles.ContainsKey (aclhash)) {
+            if (!mUpdatesWatchFiles.ContainsKey (aclhash)) {
               fileUpdateQueueItem = new FileUpdateQueueItem { Target = watchTarget };
 
-              _UpdatesWatchFiles.AddOrUpdate (aclhash, fileUpdateQueueItem, (_key, _value) => fileUpdateQueueItem);
+              mUpdatesWatchFiles.AddOrUpdate (aclhash, fileUpdateQueueItem, (_key, _value) => fileUpdateQueueItem);
             } else {
               // キューから情報を取得
-              _UpdatesWatchFiles.TryGetValue (aclhash, out fileUpdateQueueItem);
+              mUpdatesWatchFiles.TryGetValue (aclhash, out fileUpdateQueueItem);
               fileUpdateQueueItem.Target = watchTarget; // 登録している物理ファイル情報を最新のオブジェクトにする
             }
 
             // 最後に更新イベントが発生した時のファイルパスを格納しておく(Deleteイベント用)
-            fileUpdateQueueItem.OldRenameNamePath = this._Workspace.TrimWorekspacePath (watchTarget.FullName);
+            fileUpdateQueueItem.OldRenameNamePath = this.mWorkspace.TrimWorekspacePath (watchTarget.FullName);
           }
         } else {
           if (watcherChangeType == WatcherChangeTypes.Renamed && !string.IsNullOrEmpty (beforeRenamedName)) {
@@ -652,29 +673,29 @@ namespace Foxpict.Service.Core {
             // 名前変更後の項目として、新たにキューに再登録を行います。
             var renamedFullName = watchTarget.FullName.Replace (watchTarget.FullName, beforeRenamedName);
 
-            var oldkey = this._Workspace.TrimWorekspacePath (renamedFullName);
-            key = this._Workspace.TrimWorekspacePath (watchTarget.FullName);
+            var oldkey = this.mWorkspace.TrimWorekspacePath (renamedFullName);
+            key = this.mWorkspace.TrimWorekspacePath (watchTarget.FullName);
 
-            if (_UpdatesWatchFiles.ContainsKey (oldkey)) {
+            if (mUpdatesWatchFiles.ContainsKey (oldkey)) {
               // 古いキーの項目をキューから削除します。
               // 新しいキーで、キューに情報を再登録します。
-              _UpdatesWatchFiles.TryRemove (oldkey, out fileUpdateQueueItem);
-              _UpdatesWatchFiles.AddOrUpdate (key, fileUpdateQueueItem, (_key, _value) => fileUpdateQueueItem);
+              mUpdatesWatchFiles.TryRemove (oldkey, out fileUpdateQueueItem);
+              mUpdatesWatchFiles.AddOrUpdate (key, fileUpdateQueueItem, (_key, _value) => fileUpdateQueueItem);
             }
           } else if (watcherChangeType == WatcherChangeTypes.Created) {
-            key = this._Workspace.TrimWorekspacePath (watchTarget.FullName);
+            key = this.mWorkspace.TrimWorekspacePath (watchTarget.FullName);
           } else {
-            key = this._Workspace.TrimWorekspacePath (watchTarget.FullName);
+            key = this.mWorkspace.TrimWorekspacePath (watchTarget.FullName);
           }
 
           // 更新通知があったファイルが処理キューに未登録の場合、キューに更新通知情報を新規登録します
-          if (!_UpdatesWatchFiles.ContainsKey (key)) {
+          if (!mUpdatesWatchFiles.ContainsKey (key)) {
             fileUpdateQueueItem = new FileUpdateQueueItem { Target = watchTarget };
 
-            _UpdatesWatchFiles.AddOrUpdate (key, fileUpdateQueueItem, (_key, _value) => fileUpdateQueueItem);
+            mUpdatesWatchFiles.AddOrUpdate (key, fileUpdateQueueItem, (_key, _value) => fileUpdateQueueItem);
           } else {
             // キューから情報を取得
-            _UpdatesWatchFiles.TryGetValue (key, out fileUpdateQueueItem);
+            mUpdatesWatchFiles.TryGetValue (key, out fileUpdateQueueItem);
             fileUpdateQueueItem.Target = watchTarget; // 登録している物理ファイル情報を最新のオブジェクトにする
           }
 
@@ -698,6 +719,53 @@ namespace Foxpict.Service.Core {
 
         return fileUpdateQueueItem;
       }
+    }
+
+    /// <summary>
+    /// キューに登録するための、更新のあった物理ファイル情報のクラスです
+    /// </summary>
+    public class FileUpdateQueueItem {
+
+      /// <summary>
+      /// 同一ファイルで複数回の更新があった場合に時系列で更新イベントを並べるコレクション
+      /// </summary>
+      //public ObservableSynchronizedCollection<RecentInfo> Recents = new ObservableSynchronizedCollection<RecentInfo>();
+      public List<RecentInfo> Recents = new List<RecentInfo> ();
+
+      /// <summary>
+      /// 最後にFileUpdateQueueItemを更新した時刻
+      /// </summary>
+      public DateTime LastUpdate { get; set; }
+
+      /// <summary>
+      /// 変更前の名称を取得します。
+      /// </summary>
+      /// <remarks>
+      /// 名称変更更新があった場合に、変更前の名称を設定します。
+      /// 名称変更更新が複数回行われても、最初に名称変更した際の元のファイル名(ディレクトリ名)を格納します。
+      /// </remarks>
+      public string OldRenameNamePath { get; set; }
+
+      /// <summary>
+      /// ウォッチした更新対象
+      /// </summary>
+      public FileSystemInfo Target { get; set; }
+
+    }
+
+    /// <summary>
+    /// 対象のファイルへのイベントが同時に複数発生した場合の発生順序を記録する
+    /// </summary>
+    public class RecentInfo {
+      /// <summary>
+      ///
+      /// </summary>
+      public WatcherChangeTypes EventType { get; set; }
+
+      /// <summary>
+      /// 記録日時
+      /// </summary>
+      public DateTime RecentDate { get; set; }
     }
   }
 }

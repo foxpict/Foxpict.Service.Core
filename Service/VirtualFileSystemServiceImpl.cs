@@ -35,21 +35,29 @@ namespace Foxpict.Service.Core.Service {
       // 移動先のディレクトリがサブディレクトリを含む場合、存在しないサブディレクトリを作成します。
       var newFileInfo = new FileInfo (Path.Combine (workspace.PhysicalPath, aclfileLocalPath_Update));
       Directory.CreateDirectory (newFileInfo.Directory.FullName);
-      var fromFile = new FileInfo (Path.Combine (workspace.VirtualPath, aclfileLocalPath_Update));
+
+      // ファイル移動
+      var fromFile = file;
       var toFile = new FileInfo (Path.Combine (workspace.PhysicalPath, aclfileLocalPath_Update + ".tmp"));
+      mLogger.Info ($"[ファイル移動] {file.FullName}を、{toFile.FullName}へ移動します。");
       File.Move (fromFile.FullName, toFile.FullName);
 
       // 仮想領域にACLファイルの作成
-      var aclfilepath = Path.Combine (workspace.VirtualPath, aclfileLocalPath_Update) + ".aclgene";
+      var aclFileInfo = new FileInfo (Path.Combine (workspace.VirtualPath, aclfileLocalPath_Update) + ".aclgene");
+      // インポート処理の場合は、仮想領域にフォルダがないためディレクトリを作成する。
+      // 仮想領域での処理の場合は、フォルダが既に存在するはずなので、なにもしない。
+      var dir = aclFileInfo.Directory.FullName;
+      Directory.CreateDirectory (aclFileInfo.Directory.FullName);
 
-      var data = new AclFileStructure ();
-      data.Version = AclFileStructure.CURRENT_VERSION;
-      data.LastUpdate = DateTime.Now;
-      data.Data = new KeyValuePair<string, string>[] {
+      var data = new AclFileStructure () {
+        Version = AclFileStructure.CURRENT_VERSION,
+        LastUpdate = DateTime.Now,
+        Data = new KeyValuePair<string, string>[] {
         new KeyValuePair<string, string> ("ACLHASH", aclhash)
+        }
       };
 
-      using (var aclFile = File.Create (aclfilepath)) {
+      using (var aclFile = File.Create (aclFileInfo.FullName)) {
         Serializer.Serialize (aclFile, data);
       }
 

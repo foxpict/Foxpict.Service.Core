@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 using Foxpict.Service.Core.Structure;
 using Foxpict.Service.Infra;
 using Foxpict.Service.Infra.Core;
+using Foxpict.Service.Infra.Core.Model.Messaging;
 using Foxpict.Service.Infra.Model;
 using Foxpict.Service.Infra.Repository;
 using Foxpict.Service.Infra.Utils;
@@ -28,6 +29,8 @@ namespace Foxpict.Service.Core.Vfs {
 
     public static readonly string CategoryLabelNameParserPropertyKey = "InitializeBuildCategoryLabelNameParser";
 
+    bool mEnableCategoryParse;
+
     readonly IAppAppMetaInfoRepository mAppAppMetaInfoRepository;
 
     readonly IFileMappingInfoRepository mFileMappingInfoRepository;
@@ -47,13 +50,29 @@ namespace Foxpict.Service.Core.Vfs {
     readonly IVirtualFileSystemService mVirtualFileSystemService;
 
     /// <summary>
+    /// カテゴリ名のパースを行うか
+    /// </summary>
+    /// <value></value>
+    public bool EnableCategoryParse {
+      get { return this.mEnableCategoryParse; }
+      set { this.mEnableCategoryParse = value; }
+    }
+
+    /// <summary>
     /// コンストラクタ
     /// </summary>
     /// <param name="fileMappingInfoRepository"></param>
     /// <param name="categoryRepository"></param>
     /// <param name="contentRepository"></param>
     /// <param name="thumbnailBuilder"></param>
-    public FileUpdateRunner (IFileMappingInfoRepository fileMappingInfoRepository, ICategoryRepository categoryRepository, IContentRepository contentRepository, IThumbnailBuilder thumbnailBuilder, IAppAppMetaInfoRepository appAppMetaInfoRepository, ILabelRepository labelRepository, IMessagingScopeContext messagingScopeContext,
+    public FileUpdateRunner (
+      IFileMappingInfoRepository fileMappingInfoRepository,
+      ICategoryRepository categoryRepository,
+      IContentRepository contentRepository,
+      IThumbnailBuilder thumbnailBuilder,
+      IAppAppMetaInfoRepository appAppMetaInfoRepository,
+      ILabelRepository labelRepository,
+      IMessagingScopeContext messagingScopeContext,
       IEventLogRepository eventLogRepository,
       IVirtualFileSystemService virtualFileSystemService) {
       this.mFileMappingInfoRepository = fileMappingInfoRepository;
@@ -229,27 +248,7 @@ namespace Foxpict.Service.Core.Vfs {
       var pathSplitedList = new Stack<string> (pathText.Split (Path.DirectorySeparatorChar, StringSplitOptions.None));
       var fileName = pathSplitedList.Pop (); // 最後の要素は、必ずファイル名となる
       var directoryTreeNames = new Queue<string> (pathSplitedList.Reverse<string> ());
-
-      // パスから取得したトークン文字列と一致するカテゴリを取得します。
-      // 該当のカテゴリが存在しない場合はカテゴリ情報を新規登録する。
-      var appcat = mCategoryRepository.LoadRootCategory();
-      if (appcat == null) throw new ApplicationException ("ルートカテゴリが見つかりません");
-      while (directoryTreeNames.Count > 0) {
-        string parsedCategoryName;
-        bool categoryCreatedFlag = false;
-        bool parseSuccessFlag = false;
-        var oneText = directoryTreeNames.Dequeue ();
-        parseSuccessFlag = AttachParsedCategoryName (oneText, out parsedCategoryName);
-        appcat = CreateOrSelectCategory (appcat, parsedCategoryName, out categoryCreatedFlag);
-
-        if (categoryCreatedFlag && parseSuccessFlag) {
-          LOG.Info($"{MSG_NEWCATEGORY}メッセージを配信します。 CategoryId={appcat.Id}");
-          mMessagingScopeContext.Dispatcher (MSG_NEWCATEGORY, appcat.Id);
-        }
-
-        AttachParsedLabel (oneText, appcat);
-      }
-
+      var appcat = GenerateHierarchyCategory (directoryTreeNames);
       var entity = mContentRepository.New ();
       entity.Name = fileName;
       entity.SetFileMappingInfo (fileMappingInfo);
@@ -266,8 +265,9 @@ namespace Foxpict.Service.Core.Vfs {
     /// ない場合は、新しいカテゴリを作成し、作成したカテゴリ情報を返します。
     /// </summary>
     /// <param name="parentCategory"></param>
-    /// <param name="categoryName"></param>
-    /// <returns></returns>
+    /// <param name="categoryName">検索カテゴリ名。または、新規登録時のカテゴリ名。</param>
+    /// <param name="createdFlag">カテゴリを新規登録したかどうかを出力します。</param>
+    /// <returns>カテゴリ情報</returns>
     private ICategory CreateOrSelectCategory (ICategory parentCategory, string categoryName, out bool createdFlag) {
       ICategory category = null;
       foreach (var child in mCategoryRepository.FindChildren (parentCategory)) {
@@ -317,6 +317,43 @@ namespace Foxpict.Service.Core.Vfs {
     }
 
     /// <summary>
+    /// 階層化されたカテゴリ情報をシステムに登録します
+    /// </summary>
+    /// <param name="directoryTreeNames">階層化カテゴリ名のキュー</param>
+    /// <returns>キューの最後の要素を示すカテゴリ情報</returns>
+    private ICategory GenerateHierarchyCategory (Queue<string> directoryTreeNames) {
+      // パスから取得したトークン文字列と一致するカテゴリを取得します。
+      // 該当のカテゴリが存在しない場合はカテゴリ情報を新規登録する。
+      var appcat = mCategoryRepository.LoadRootCategory ();
+      if (appcat == null) throw new ApplicationException ("ルートカテゴリが見つかりません");
+      while (directoryTreeNames.Count > 0) {
+        var oneText = directoryTreeNames.Dequeue ();
+        bool parseSuccessFlag = false;
+        string parsedCategoryName = oneText;
+
+        if (mEnableCategoryParse) {
+          parseSuccessFlag = AttachParsedCategoryName (oneText, out parsedCategoryName);
+        }
+
+        bool categoryCreatedFlag = false;
+        appcat = CreateOrSelectCategory (appcat, parsedCategoryName, out categoryCreatedFlag);
+
+        if (categoryCreatedFlag && parseSuccessFlag) {
+          LOG.Info ($"{MSG_NEWCATEGORY}メッセージを配信します。 CategoryId={appcat.Id}");
+          mMessagingScopeContext.Dispatcher (MSG_NEWCATEGORY, new NewCategoryMessageParameter {
+            CategoryId = appcat.Id,
+              EnableCategoryParse = mEnableCategoryParse
+          });
+        }
+        if (mEnableCategoryParse) {
+          AttachParsedLabel (oneText, appcat);
+        }
+      }
+
+      return appcat;
+    }
+
+    /// <summary>
     /// カテゴリ名をパースし結果を取得する。
     /// パースルールは、アプリケーション設定情報から取得する
     /// </summary>
@@ -360,8 +397,6 @@ namespace Foxpict.Service.Core.Vfs {
     /// <param name="category"></param>
     /// <returns></returns>
     private bool AttachParsedLabel (string parseBase, ICategory category) {
-      LOG.Trace ("IN");
-
       string categoryName = parseBase;
 
       // 最大でMAX_CATEGORYPARSEREGE個数の正規表現からラベルのパースを行う。
